@@ -26,6 +26,48 @@
 bool m_isFullscreenKeyReleased = true;
 bool m_isResizing = false;
 
+#if defined(__SWITCH__)
+namespace
+{
+    // [Switch] The window follows the console's output: 1920x1080 docked, 1280x720 in handheld mode. The default
+    // display resolution tells which without an applet message loop (none runs here, so appletGetOperationMode()
+    // would keep its first value); a dock set to 720p counts as handheld. Its change event says when to look again.
+    // The Resolution Scale option is kept per mode ([Switch] SwitchDockedResolutionScale 0.8 = 864p,
+    // SwitchHandheldResolutionScale 0.9 = 648p).
+    constexpr int DOCKED_WIDTH = 1920;
+    constexpr int DOCKED_HEIGHT = 1080;
+
+    Event g_displayResolutionEvent{};
+    bool g_displayResolutionEventValid = false;
+    bool g_docked = false;
+
+    bool QueryDocked()
+    {
+        s32 width = 0;
+        s32 height = 0;
+        if (R_SUCCEEDED(appletGetDefaultDisplayResolution(&width, &height)) && height > 0)
+            return height >= DOCKED_HEIGHT;
+
+        return appletGetOperationMode() == AppletOperationMode_Console;
+    }
+
+    // The mode's scale becomes the option's value, and its default what the option's reset gives.
+    void ApplyModeResolutionScale(bool docked)
+    {
+        auto& modeScale = docked ? Config::SwitchDockedResolutionScale : Config::SwitchHandheldResolutionScale;
+        modeScale.Value = std::clamp(modeScale.Value, 0.25f, 2.0f);
+        Config::ResolutionScale.DefaultValue = modeScale.DefaultValue;
+        Config::ResolutionScale.Value = modeScale.Value;
+    }
+}
+
+void GameWindow::SetSwitchModeResolutionScale(float scale)
+{
+    auto& modeScale = g_docked ? Config::SwitchDockedResolutionScale : Config::SwitchHandheldResolutionScale;
+    modeScale.Value = std::clamp(scale, 0.25f, 2.0f);
+}
+#endif
+
 int Window_OnSDLEvent(void*, SDL_Event* event)
 {
     if (ImGui::GetIO().BackendPlatformUserData != nullptr)
@@ -168,18 +210,26 @@ void GameWindow::Init(const char* sdlVideoDriver)
 #if defined(__SWITCH__)
     (void)sdlVideoDriver;
 
+    g_docked = QueryDocked();
+
     s_x = 0;
     s_y = 0;
-    s_width = DEFAULT_WIDTH;
-    s_height = DEFAULT_HEIGHT;
+    s_width = g_docked ? DOCKED_WIDTH : DEFAULT_WIDTH;
+    s_height = g_docked ? DOCKED_HEIGHT : DEFAULT_HEIGHT;
     s_isFocused = true;
     s_isFullscreenCursorVisible = false;
+
+    // Swap chains are made at this size from now on (a later size goes through the swap chain, see Update).
+    plume::SetSwitchSwapChainSize(s_width, s_height);
+    ApplyModeResolutionScale(g_docked);
+    g_displayResolutionEventValid = R_SUCCEEDED(appletGetDefaultDisplayResolutionChangeEvent(&g_displayResolutionEvent));
 
     s_renderWindow = nwindowGetDefault();
     if (s_renderWindow != nullptr)
     {
         nwindowSetDimensions(s_renderWindow, s_width, s_height);
-        nwindowSetCrop(s_renderWindow, 0, 0, s_width, s_height);
+        // No crop: the whole buffer is shown, whatever size the swap chain is made at later.
+        nwindowSetCrop(s_renderWindow, 0, 0, 0, 0);
         nwindowSetSwapInterval(s_renderWindow, 1);
 
         uint32_t nativeWidth = 0;
@@ -269,6 +319,21 @@ void GameWindow::Init(const char* sdlVideoDriver)
 void GameWindow::Update()
 {
 #if defined(__SWITCH__)
+    // Docked or handheld now? A new size goes to the swap chain, which is made again at it (plume's needsResize,
+    // then CheckSwapChain) and sets the window's size; the game then remakes its render targets (g_needsResize),
+    // at the mode's resolution scale.
+    if (g_displayResolutionEventValid && R_SUCCEEDED(eventWait(&g_displayResolutionEvent, 0)))
+    {
+        const bool docked = QueryDocked();
+        if (docked != g_docked)
+        {
+            g_docked = docked;
+            plume::SetSwitchSwapChainSize(docked ? DOCKED_WIDTH : DEFAULT_WIDTH, docked ? DOCKED_HEIGHT : DEFAULT_HEIGHT);
+            ApplyModeResolutionScale(docked);
+            VideoConfigValueChangedCallback(&Config::ResolutionScale);
+        }
+    }
+
     uint32_t nativeWidth = 0;
     uint32_t nativeHeight = 0;
     if (s_renderWindow != nullptr && nwindowGetDimensions(s_renderWindow, &nativeWidth, &nativeHeight) == 0)
@@ -505,11 +570,9 @@ void GameWindow::SetDimensions(int w, int h, int x, int y)
     (void)x;
     (void)y;
 
-    if (s_renderWindow != nullptr)
-    {
-        nwindowSetDimensions(s_renderWindow, w, h);
-        nwindowSetCrop(s_renderWindow, 0, 0, w, h);
-    }
+    // The window cannot change size while the swap chain has buffers on it: the swap chain is made again at the
+    // new size instead, which sets it.
+    plume::SetSwitchSwapChainSize(w, h);
 #else
     SDL_SetWindowSize(s_pWindow, w, h);
     SDL_ResizeEvent(s_pWindow, w, h);

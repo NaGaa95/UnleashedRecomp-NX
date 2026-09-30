@@ -23,6 +23,14 @@
 #include <os/logger.h>
 #include <os/process.h>
 #include <os/registry.h>
+#include <os/switch_perf.h>
+#include <os/switch_overlay.h>
+#include <os/switch_cpu_profiler.h>
+#include <os/switch_stall_watch.h>
+#include <os/switch_crash.h>
+#if defined(__SWITCH__)
+#include <switch_build_id.h>
+#endif
 #include <ui/game_window.h>
 #include <ui/installer_wizard.h>
 #include <mod/mod_loader.h>
@@ -275,6 +283,66 @@ int main(int argc, char *argv[])
     }
 
     Config::Load();
+
+#if defined(__SWITCH__)
+    // [Switch] SwitchLog. stderr carries the renderer's and the driver's own diagnostics (pipeline cache,
+    // overlay, NVK fast paths, ZCULL planes, Mesa warnings, the profilers' reports). Horizon has no console
+    // behind it, so without this they go nowhere. Line-buffered: these messages are rare. The directory
+    // exists: os::logger::Init() creates it.
+    os::logger::SetFileEnabled(Config::SwitchLog);
+    if (Config::SwitchLog)
+    {
+        if (freopen("sdmc:/switch/UnleashedRecomp/stderr.log", "w", stderr) != nullptr)
+            setvbuf(stderr, nullptr, _IOLBF, 1024);
+
+        // First line: which build wrote this log (tools/build-switch.sh sets the ID at configure time).
+        fprintf(stderr, "Build: %s, guest code %s, LTO %s\n", UNLEASHED_RECOMP_SWITCH_BUILD_ID,
+#ifdef UNLEASHED_RECOMP_CLASSIC_CODEGEN
+            "classic",
+#else
+            "round 7",
+#endif
+#ifdef UNLEASHED_RECOMP_SWITCH_LTO
+            "on");
+#else
+            "off");
+#endif
+    }
+
+    // crash.log on a CPU exception or a lost GPU, whatever SwitchLog says (os/switch/crash_switch.cpp).
+    os::switch_crash::Init(Config::SwitchLog);
+
+    os::switch_cpu_profiler::RegisterCurrentThread("main");
+    os::switch_cpu_profiler::Start(Config::SwitchCpuProfiler);
+    os::switch_stall_watch::Start(Config::SwitchStallWatchSeconds);
+
+    // [Switch] SwitchRelaxedAtomics: read by every guest atomic from now on (no guest code has run yet).
+    // SwitchNativeRtti, SwitchNativeShaderConstants: read by those hooks (misc_impl.cpp), also from now on.
+    {
+        extern bool g_ppcRelaxedAtomics;
+        extern bool g_nativeRtti;
+        extern bool g_nativeShaderConstants;
+        extern bool g_nativeDecompress;
+        extern bool g_verifyNativeDecompress;
+        extern bool g_fastCriticalSections;
+        extern bool g_fastEvents;
+        extern bool g_guestSpinBeforeSleep;
+        g_guestSpinBeforeSleep = Config::SwitchGuestSpinBeforeSleep;
+        g_ppcRelaxedAtomics = Config::SwitchRelaxedAtomics;
+        g_nativeRtti = Config::SwitchNativeRtti;
+        g_nativeShaderConstants = Config::SwitchNativeShaderConstants;
+        g_nativeDecompress = Config::SwitchNativeDecompress;
+        g_verifyNativeDecompress = Config::SwitchVerifyNativeDecompress;
+        g_fastCriticalSections = Config::SwitchFastCriticalSections;
+        g_fastEvents = Config::SwitchFastEvents;
+    }
+
+    if (Config::SwitchHandheldGpuBoost)
+        os::switch_perf::StartHandheldGpuBoost();
+
+    if (Config::SwitchOverlayFps)
+        os::switch_overlay::Start();
+#endif
 
     if (forceInstallationCheck)
     {

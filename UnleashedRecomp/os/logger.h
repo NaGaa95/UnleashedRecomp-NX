@@ -61,4 +61,10 @@ namespace os::logger
 
     void Init();
     void Log(const std::string_view str, ELogType type = ELogType::None, const char* func = nullptr);
+
+#if defined(__SWITCH__)
+    // [Switch] SwitchLog: whether UnleashedRecomp.log is written. Until this is called (after Config::Load) the
+    // lines are kept in memory; then they are written to the file, or dropped with every later one.
+    void SetFileEnabled(bool enabled);
+#endif
 }

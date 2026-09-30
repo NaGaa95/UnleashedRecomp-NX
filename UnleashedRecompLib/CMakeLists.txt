@@ -64,6 +64,23 @@ elseif (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-frounding-math>)
 endif()
 
+if (UNLEASHED_RECOMP_SWITCH AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    # The guest never sees the host's errno or floating-point exception flags, so the recompiled code
+    # does not need to preserve them: -fno-math-errno turns sqrt() into a single fsqrt instead of a
+    # check plus a possible libm call per square root, and -fno-trapping-math lets GCC if-convert
+    # floating-point code (FP traps are disabled on the host anyway). Neither changes any value:
+    # rounding is still honoured (-frounding-math), and no fast-math reassociation is enabled.
+    add_compile_options(
+        $<$<COMPILE_LANGUAGE:CXX>:-fno-math-errno>
+        $<$<COMPILE_LANGUAGE:CXX>:-fno-trapping-math>
+    )
+
+    # AArch64 GCC keeps a frame pointer by default: every non-leaf recompiled function set up x29 and
+    # could not use it as a register. The recompiled code keeps many guest registers in host registers,
+    # so it gets x29 back. Only here: the port's own code keeps frame pointers for crash backtraces.
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fomit-frame-pointer>)
+endif()
+
 if (UNLEASHED_RECOMP_SWITCH)
     set(UNLEASHED_RECOMP_HOST_TOOLS_DIR "${CMAKE_SOURCE_DIR}/build/host-tools" CACHE PATH "Directory containing host-side generation tools.")
     set(UNLEASHED_RECOMP_HOST_X_DECOMPRESS "${UNLEASHED_RECOMP_HOST_TOOLS_DIR}/tools/x_decompress/x_decompress" CACHE FILEPATH "Host x_decompress executable.")
@@ -74,7 +91,11 @@ if (UNLEASHED_RECOMP_SWITCH)
         "${CMAKE_CURRENT_SOURCE_DIR}/config/SWA.toml"
         "${UNLEASHED_RECOMP_TOOLS_ROOT}/XenonRecomp/XenonUtils/ppc_context.h"
     )
-    set(UNLEASHED_RECOMP_XENON_RECOMP_DEPENDS "${UNLEASHED_RECOMP_HOST_XENON_RECOMP}")
+    # tools/build-switch.sh generates ppc/ itself (step 4, and only when ppc/ is missing), then edits the
+    # sources (tools/switch-direct-calls.py). The tool and ppc_context.h are rewritten by every patch
+    # step, so depending on them made CMake regenerate all of ppc/ (and drop those edits) on every build.
+    set(UNLEASHED_RECOMP_XENON_RECOMP_DEPENDS "")
+    set(UNLEASHED_RECOMP_PPC_CONTEXT_DEPENDS "")
     set(UNLEASHED_RECOMP_X_DECOMPRESS_COMMAND "${UNLEASHED_RECOMP_HOST_X_DECOMPRESS}")
     set(UNLEASHED_RECOMP_X_DECOMPRESS_DEPENDS "${UNLEASHED_RECOMP_HOST_X_DECOMPRESS}")
     set(UNLEASHED_RECOMP_XENOS_RECOMP_COMMAND
@@ -89,6 +110,7 @@ else()
         XENON_RECOMP_CONFIG_FILE_PATH=\"${CMAKE_CURRENT_SOURCE_DIR}/config/SWA.toml\"
         XENON_RECOMP_HEADER_FILE_PATH=\"${UNLEASHED_RECOMP_TOOLS_ROOT}/XenonRecomp/XenonUtils/ppc_context.h\")
     set(UNLEASHED_RECOMP_XENON_RECOMP_COMMAND "$<TARGET_FILE:XenonRecomp>")
+    set(UNLEASHED_RECOMP_PPC_CONTEXT_DEPENDS "${UNLEASHED_RECOMP_TOOLS_ROOT}/XenonRecomp/XenonUtils/ppc_context.h")
     set(UNLEASHED_RECOMP_X_DECOMPRESS_COMMAND "$<TARGET_FILE:x_decompress>")
     set(UNLEASHED_RECOMP_XENOS_RECOMP_COMMAND "$<TARGET_FILE:XenosRecomp>")
 endif()
@@ -114,7 +136,7 @@ add_custom_command(
         "${CMAKE_CURRENT_SOURCE_DIR}/private/default.xex"
         "${CMAKE_CURRENT_SOURCE_DIR}/private/default.xexp"
         "${CMAKE_CURRENT_SOURCE_DIR}/config/SWA.toml"
-        "${UNLEASHED_RECOMP_TOOLS_ROOT}/XenonRecomp/XenonUtils/ppc_context.h"
+        ${UNLEASHED_RECOMP_PPC_CONTEXT_DEPENDS}
         ${UNLEASHED_RECOMP_XENON_RECOMP_DEPENDS}
     USES_TERMINAL
 )

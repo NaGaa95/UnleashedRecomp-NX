@@ -79,6 +79,11 @@ namespace Chao::CSD
 static RecompMutex g_pathMutex;
 static std::map<const void*, XXH64_hash_t> g_paths;
 
+#if defined(__SWITCH__)
+// [Switch] SwitchModifierCache (FindModifier). Changes whenever g_paths does (under g_pathMutex).
+static std::atomic<uint32_t> g_pathsGeneration{ 1 };
+#endif
+
 static XXH64_hash_t HashStr(const std::string_view& value)
 {
     return XXH3_64bits(value.data(), value.size());
@@ -88,6 +93,9 @@ static void EmplacePath(const void* key, const std::string_view& value)
 {
     std::lock_guard lock(g_pathMutex);
     g_paths.emplace(key, HashStr(value));
+#if defined(__SWITCH__)
+    g_pathsGeneration.fetch_add(1, std::memory_order_release);
+#endif
 }
 
 static void TraverseCast(Chao::CSD::Scene* scene, uint32_t castNodeIndex, Chao::CSD::CastNode* castNode, uint32_t castIndex, const std::string& parentPath)
@@ -172,6 +180,9 @@ PPC_FUNC(sub_825E2E60)
         auto upper = g_paths.lower_bound(key + fileSize);
 
         g_paths.erase(lower, upper);
+#if defined(__SWITCH__)
+        g_pathsGeneration.fetch_add(1, std::memory_order_release);
+#endif
     }
 
     __imp__sub_825E2E60(ctx, base);
@@ -790,7 +801,21 @@ static const xxHashMap<CsdModifier> g_modifiers =
     { HashStr("ui_worldmap_help/balloon/help_window/position/msg_bg_r"), { EXTEND_RIGHT } },
 };
 
-static std::optional<CsdModifier> FindModifier(uint32_t data)
+#if defined(__SWITCH__)
+// [Switch] SwitchModifierCache. The UI looks up the modifier of every scene, cast node and cast it draws, each
+// time through the lock and the ordered map of all loaded paths. The results are kept per thread for the
+// addresses seen last, tagged with the generation of g_paths they were found in: any change of g_paths
+// (a project loaded or freed) makes them all stale. The generation is read before the lookup it tags, so a
+// change during the lookup also leaves the entry stale.
+struct ModifierCacheEntry
+{
+    uint32_t generation = 0;
+    uint32_t data = 0;
+    std::optional<CsdModifier> modifier;
+};
+#endif
+
+static std::optional<CsdModifier> FindModifierUncached(uint32_t data)
 {
     XXH64_hash_t path;
     {
@@ -808,6 +833,61 @@ static std::optional<CsdModifier> FindModifier(uint32_t data)
         return findResult->second;
 
     return {};
+}
+
+#if defined(__SWITCH__)
+// Round 9: the first thread to look a modifier up (the game's thread, which draws the UI) gets a cache of its own
+// eight times larger outside TLS (a thread-local access is a call with -mtp=soft); others keep theirs in TLS.
+// Threads are told apart by their TLS region (TPIDRRO_EL0), which every thread has its own of.
+static std::atomic<uintptr_t> g_modifierCacheOwner{ 0 };
+static ModifierCacheEntry g_ownerModifierCache[512];
+
+static uintptr_t CurrentThreadTlsRegion()
+{
+    uintptr_t region;
+    __asm__ ("mrs %x[data], tpidrro_el0" : [data] "=r" (region));
+    return region;
+}
+#endif
+
+static std::optional<CsdModifier> FindModifier(uint32_t data)
+{
+#if defined(__SWITCH__)
+    if (Config::SwitchModifierCache)
+    {
+        const uintptr_t self = CurrentThreadTlsRegion();
+        uintptr_t owner = g_modifierCacheOwner.load(std::memory_order_relaxed);
+        if (owner == 0 && g_modifierCacheOwner.compare_exchange_strong(owner, self, std::memory_order_relaxed))
+            owner = self;
+
+        ModifierCacheEntry* cache;
+        uint32_t shift;
+        if (owner == self)
+        {
+            cache = g_ownerModifierCache;
+            shift = 23;
+        }
+        else
+        {
+            // Constant-initialised (no per-thread constructor), 2 KB of every other thread's TLS.
+            thread_local ModifierCacheEntry threadCache[64];
+            cache = threadCache;
+            shift = 26;
+        }
+
+        const uint32_t generation = g_pathsGeneration.load(std::memory_order_acquire);
+        auto& entry = cache[(data * 0x9E3779B1u) >> shift];
+        if (entry.generation == generation && entry.data == data)
+            return entry.modifier;
+
+        entry.modifier = FindModifierUncached(data);
+        entry.data = data;
+        entry.generation = generation;
+        return entry.modifier;
+    }
+#endif
+
+    return FindModifierUncached(data);
 }
 
 static std::optional<CsdModifier> g_sceneModifier;

@@ -2,8 +2,12 @@
 
 #ifdef __spirv__
 
-#define s0_Texture2DDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 0)
-#define s0_SamplerDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 192)
+// Constants: from the set 4 uniform buffers when the pipeline has SPEC_CONSTANT_CONSTANTS_UBO (NVK reads
+// them from a hardware constant bank), otherwise through the push-constant pointers, as before.
+#define s0_Texture2DDescriptorIndex (UR_CONSTANTS_UBO ? UR_SHARED_UINT(0) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 0))
+#define s0_SamplerDescriptorIndex (UR_CONSTANTS_UBO ? UR_SHARED_UINT(192) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 192))
+// Size of the texture in slot 0 (SPEC_CONSTANT_TEXTURE_SIZE; float2 at byte 288).
+#define s0_Texture2DSize (UR_CONSTANTS_UBO ? float2(UR_SHARED_FLOAT(288), UR_SHARED_FLOAT(292)) : vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 288))
 
 #else
 
@@ -24,8 +28,13 @@ float4 main(
     Texture2D<float4> texture = g_Texture2DDescriptorHeap[s0_Texture2DDescriptorIndex];
     SamplerState samplerState = g_SamplerDescriptorHeap[s0_SamplerDescriptorIndex];
     
+#ifdef __spirv__
+    // The size table holds exactly what GetDimensions() returns (verify mode keeps the query).
+    float2 dimensions = getTexture2DSize(texture, s0_Texture2DSize);
+#else
     uint2 dimensions;
     texture.GetDimensions(dimensions.x, dimensions.y);
+#endif
     
     // https://www.shadertoy.com/view/csX3RH
     float2 uvTexspace = iTexCoord1.xy * dimensions;

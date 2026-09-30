@@ -24,6 +24,14 @@
 
 using namespace vk;
 
+#ifdef __SWITCH__
+// The driver is linked in statically: its ICD entry point is the main proc addr (plume falls back to
+// it the same way). vulkan_core.h's vkGetInstanceProcAddr prototype names nothing callable here, the
+// symbol is volk's function pointer variable.
+extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance,
+    const char* pName);
+#endif
+
 namespace {
     /// load libvulkan.so.1 and return its handle
 #ifndef __SWITCH__
@@ -53,7 +61,7 @@ namespace {
     }
 #else
     PFN_vkGetInstanceProcAddr get_mpa() {
-        return vkGetInstanceProcAddr;
+        return vk_icdGetInstanceProcAddr;
     }
 #endif
 }

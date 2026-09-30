@@ -8,6 +8,12 @@ struct ShaderCacheEntry
     const uint32_t spirvOffset;
     const uint32_t spirvSize;
     const uint32_t specConstantsMask;
+    // Float4 constant registers the shader can read, counted from c0 (the whole block when it indexes
+    // an array by a0 or aL). The renderer uploads only these.
+    const uint32_t float4ConstantRegisters;
+    const uint32_t gatherSlots;
+    // SHADER_FLAG_* (shader_common.h).
+    const uint32_t flags;
     struct GuestShader* guestShader;
 };
 

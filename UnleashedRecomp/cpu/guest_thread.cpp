@@ -7,11 +7,35 @@
 #include "ppc_context.h"
 
 #if defined(__SWITCH__)
+#include <os/switch_cpu_profiler.h>
+#include <user/config.h>
+
 // Minimal libnx declarations (avoids pulling <switch.h> macros into this TU).
 extern "C"
 {
     uint32_t svcSetThreadPriority(uint32_t handle, uint32_t priority);
+    uint32_t svcSetThreadCoreMask(uint32_t handle, int32_t preferredCore, uint32_t affinityMask);
+    uint32_t svcGetInfo(uint64_t* out, uint32_t id0, uint32_t handle, uint64_t id1);
     uint32_t threadGetCurHandle(void);
+}
+
+// [Switch] SwitchRelaxedAtomics, read by the recompiled code's stwcx./stdcx. (ppc_context.h). Set once in
+// main() after the configuration is loaded, before any guest code runs.
+bool g_ppcRelaxedAtomics = false;
+
+// [Switch] SwitchThreadIdealCores: the thread starts on the given core and may still run on every core of
+// the process.
+static void ApplyIdealCore(uint32_t handle, int32_t core)
+{
+    static uint64_t processCores = 0;
+    if (processCores == 0 && (svcGetInfo(&processCores, 0 /* InfoType_CoreMask */, 0xFFFF8001 /* CUR_PROCESS_HANDLE */, 0) != 0 ||
+        processCores == 0))
+    {
+        processCores = 0x7;
+    }
+
+    if ((processCores & (uint64_t(1) << core)) != 0)
+        svcSetThreadCoreMask(handle, core, uint32_t(processCores));
 }
 #endif
 
@@ -92,6 +116,9 @@ static void GuestThreadFunc(GuestThreadHandle* hThread)
     int32_t pendingPriority = hThread->pendingHorizonPriority.load(std::memory_order_acquire);
     if (pendingPriority >= 0)
         svcSetThreadPriority(threadGetCurHandle(), static_cast<uint32_t>(pendingPriority));
+    const int32_t pendingCore = hThread->pendingIdealCore.load(std::memory_order_acquire);
+    if (pendingCore >= 0)
+        ApplyIdealCore(threadGetCurHandle(), pendingCore);
 #endif
     hThread->WaitUntilResumed();
 #if defined(__SWITCH__)
@@ -99,7 +126,14 @@ static void GuestThreadFunc(GuestThreadHandle* hThread)
     if (pendingPriority >= 0)
         svcSetThreadPriority(threadGetCurHandle(), static_cast<uint32_t>(pendingPriority));
 #endif
+#if defined(__SWITCH__)
+    // Named by the guest function the thread runs, which tells the game's threads apart.
+    os::switch_cpu_profiler::RegisterCurrentThreadWithAddress("guest", hThread->params.function);
+#endif
     GuestThread::Start(hThread->params);
+#if defined(__SWITCH__)
+    os::switch_cpu_profiler::UnregisterCurrentThread();
+#endif
 #ifdef USE_PTHREAD
     return nullptr;
 #endif
@@ -303,6 +337,25 @@ int GetThreadPriorityImpl(GuestThreadHandle* hThread)
 
 uint32_t SetThreadIdealProcessorImpl(GuestThreadHandle* hThread, uint32_t dwIdealProcessor)
 {
+#if defined(__SWITCH__)
+    // [Switch] SwitchThreadIdealCores. The Xbox 360 has three cores of two hardware threads each (0-5);
+    // the Switch gives the game three cores.
+    if (Config::SwitchThreadIdealCores && dwIdealProcessor < 6)
+    {
+        const int32_t core = int32_t(dwIdealProcessor / 2);
+        if (hThread == GetKernelObject(CURRENT_THREAD_HANDLE))
+        {
+            ApplyIdealCore(threadGetCurHandle(), core);
+        }
+        else if (hThread != nullptr)
+        {
+            hThread->pendingIdealCore.store(core, std::memory_order_release);
+            const uint32_t handle = hThread->kernelHandle.load(std::memory_order_acquire);
+            if (handle != 0)
+                ApplyIdealCore(handle, core);
+        }
+    }
+#endif
     return 0;
 }
 

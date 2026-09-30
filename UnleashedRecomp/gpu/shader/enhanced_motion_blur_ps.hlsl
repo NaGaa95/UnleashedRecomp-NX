@@ -2,17 +2,19 @@
 
 #ifdef __spirv__
 
-#define g_BlurRate vk::RawBufferLoad<float4>(g_PushConstants.PixelShaderConstants + 2400, 0x10)
-#define g_ViewportSize vk::RawBufferLoad<float4>(g_PushConstants.PixelShaderConstants + 384, 0x10)
+// Constants: from the set 4 uniform buffers when the pipeline has SPEC_CONSTANT_CONSTANTS_UBO (NVK reads
+// them from a hardware constant bank), otherwise through the push-constant pointers, as before.
+#define g_BlurRate (UR_CONSTANTS_UBO ? g_UboPixel.v[150] : vk::RawBufferLoad<float4>(g_PushConstants.PixelShaderConstants + 2400, 0x10))
+#define g_ViewportSize (UR_CONSTANTS_UBO ? g_UboPixel.v[24] : vk::RawBufferLoad<float4>(g_PushConstants.PixelShaderConstants + 384, 0x10))
 
-#define sampColor_Texture2DDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 0)
-#define sampColor_SamplerDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 192)
+#define sampColor_Texture2DDescriptorIndex (UR_CONSTANTS_UBO ? UR_SHARED_UINT(0) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 0))
+#define sampColor_SamplerDescriptorIndex (UR_CONSTANTS_UBO ? UR_SHARED_UINT(192) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 192))
 
-#define sampVelocityMap_Texture2DDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 4)
-#define sampVelocityMap_SamplerDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 196)
+#define sampVelocityMap_Texture2DDescriptorIndex (UR_CONSTANTS_UBO ? UR_SHARED_UINT(4) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 4))
+#define sampVelocityMap_SamplerDescriptorIndex (UR_CONSTANTS_UBO ? UR_SHARED_UINT(196) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 196))
 
-#define sampZBuffer_Texture2DDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 8)
-#define sampZBuffer_SamplerDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 200)
+#define sampZBuffer_Texture2DDescriptorIndex (UR_CONSTANTS_UBO ? UR_SHARED_UINT(8) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 8))
+#define sampZBuffer_SamplerDescriptorIndex (UR_CONSTANTS_UBO ? UR_SHARED_UINT(200) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 200))
 
 #else
 

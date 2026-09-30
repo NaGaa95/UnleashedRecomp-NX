@@ -10,11 +10,31 @@
 #
 # Inputs you supply (kept out of the repo):
 #   - Game files in UnleashedRecompLib/private/ : default.xex, default.xexp, shader.ar
-#   - NVK Vulkan driver: NVK_ROOT -> extracted mesa build dir containing
-#         builddir-switch/src/nouveau/vulkan/libvulkan.a  (closed/unshipped)
+#   - NVK Vulkan driver: NVK_ROOT -> any of
+#         a mesa-switch tree built with its Docker build-switch.sh
+#             (builddir-switch/src/nouveau/vulkan/libvulkan.a)
+#         a mesa-switch tree built with build-unified.sh (MSYS2)
+#             (mesa-unified-install/opt/devkitpro/portlibs/switch/lib/libvulkan.a)
+#         an extracted Mesa Switch SDK, its install root or its portlibs/switch folder
+#             (lib/libvulkan.a + include/vulkan)
+#     See docs/SWITCH-MESA.md to build the driver with the nfsmw-nx improvements.
 #
 # Usage:
 #   NVK_ROOT=/c/path/to/mesa-nvk  tools/build-switch.sh
+#
+# Performance switches (see docs/SWITCH-PERFORMANCE.md):
+#   SWITCH_DIRECT_CALLS=1  (default) rewrite calls between recompiled functions so GCC can inline them
+#   SWITCH_LTO=0           (default) set to 1 for link-time optimisation (needs a lot of build RAM)
+#   SWITCH_LTO_JOBS=2      parallel LTRANS jobs when SWITCH_LTO=1
+#   SWITCH_PGO=            empty (default), "generate" (instrumented build, no LTO) or "use"
+#   SWITCH_PGO_DIR=pgo     folder with the .gcda files copied from sdmc:/switch/UnleashedRecomp/pgo
+#   SWITCH_RECOMP_O2=0     set to 1 to A/B -O2 instead of -O3 for the recompiled code
+#   SWITCH_O2=0            set to 1 to compile all the code with -O2 instead of -O3
+#   SWITCH_IPA_PTA=0       set to 1 to compile and link with -fipa-pta (whole-program points-to analysis at the LTO link)
+#   SWITCH_CLASSIC_CODEGEN=0  set to 1 to A/B the round-7 code generation: ppc/ generated as before it
+#                          (volatile guest memory, all callee-saved stores, FPSCR state per block) and no
+#                          hot-function section. ppc/ is regenerated whenever this or the recompiler changes.
+#   SWITCH_BUILD_ID=       printed first in stderr.log (default: date, time and the options above)
 #
 # To reproduce a validated release shader cache instead of regenerating it:
 #   SWITCH_SHADER_CACHE_OBJECT=/c/path/to/release_shader_cache.obj \
@@ -29,21 +49,61 @@ set -euo pipefail
 : "${DEVKITPRO:=/opt/devkitpro}"
 # clangarm64 cmake resolves native Windows paths, not the msys /opt mount.
 command -v cygpath >/dev/null 2>&1 && DEVKITPRO="$(cygpath -m "$DEVKITPRO")"
-: "${NVK_ROOT:?Set NVK_ROOT to your extracted mesa-nvk dir (contains builddir-switch/src/nouveau/vulkan/libvulkan.a).}"
+: "${NVK_ROOT:?Set NVK_ROOT to your mesa-switch build (builddir-switch or mesa-unified-install) or a Mesa Switch SDK folder. See docs/SWITCH-MESA.md.}"
 JOBS="${JOBS:-$(nproc 2>/dev/null || echo 8)}"
 SWITCH_SHADER_CACHE_OBJECT="${SWITCH_SHADER_CACHE_OBJECT:-}"
 SWITCH_SHADER_CACHE_OBJECT_SHA256="${SWITCH_SHADER_CACHE_OBJECT_SHA256:-}"
+SWITCH_DIRECT_CALLS="${SWITCH_DIRECT_CALLS:-1}"
+SWITCH_LTO="${SWITCH_LTO:-0}"
+SWITCH_LTO_JOBS="${SWITCH_LTO_JOBS:-2}"
+SWITCH_PGO="${SWITCH_PGO:-}"
+SWITCH_PGO_DIR="${SWITCH_PGO_DIR:-}"
+SWITCH_RECOMP_O2="${SWITCH_RECOMP_O2:-0}"
+SWITCH_O2="${SWITCH_O2:-0}"
+SWITCH_IPA_PTA="${SWITCH_IPA_PTA:-0}"
+SWITCH_CLASSIC_CODEGEN="${SWITCH_CLASSIC_CODEGEN:-0}"
+if [ -z "${SWITCH_BUILD_ID:-}" ]; then
+  SWITCH_BUILD_ID="$(date +%Y%m%d-%H%M)"
+  [ "$SWITCH_LTO" = "1" ] && SWITCH_BUILD_ID="$SWITCH_BUILD_ID-lto"
+  [ "$SWITCH_CLASSIC_CODEGEN" = "1" ] && SWITCH_BUILD_ID="$SWITCH_BUILD_ID-classic"
+  [ -n "$SWITCH_PGO" ] && SWITCH_BUILD_ID="$SWITCH_BUILD_ID-pgo-$SWITCH_PGO"
+fi
+
+if [ "$SWITCH_PGO" = "generate" ] && [ "$SWITCH_LTO" = "1" ]; then
+  echo "SWITCH_PGO=generate needs SWITCH_LTO=0 (instrumented builds are not linked with LTO)." >&2
+  exit 2
+fi
 
 CLANGARM64="${CLANGARM64:-/c/msys64/clangarm64/bin}"
 CLANG64="${CLANG64:-/c/msys64/clang64/bin}"
 CMAKE="$CLANGARM64/cmake.exe"
 NINJA="$CLANGARM64/ninja.exe"
+# The host tools built with that clang (XenonRecomp, x_decompress...) need its runtime DLLs
+# (libc++, libunwind) when they run in steps 4 and 5. A CLANGARM64/CLANG64 shell has them on PATH;
+# an MSYS shell does not, and the tools then exit without a word.
+export PATH="$CLANGARM64:$PATH"
 PYTHON="${PYTHON:-}"
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root_dir"
+[ -n "$SWITCH_PGO_DIR" ] || SWITCH_PGO_DIR="$root_dir/pgo"
 
-NVK_LIB="$NVK_ROOT/builddir-switch/src/nouveau/vulkan/libvulkan.a"
+# Accept the Docker build tree, the MSYS2 unified install stage, or an SDK folder. For the SDK
+# layouts NVK_ROOT becomes the portlibs/switch folder, whose include/ has the Vulkan headers.
+NVK_LIB=""
+for nvk_candidate_root in \
+    "$NVK_ROOT" \
+    "$NVK_ROOT/opt/devkitpro/portlibs/switch" \
+    "$NVK_ROOT/mesa-unified-install/opt/devkitpro/portlibs/switch"; do
+  if [ -f "$nvk_candidate_root/lib/libvulkan.a" ]; then
+    NVK_ROOT="$nvk_candidate_root"
+    NVK_LIB="$nvk_candidate_root/lib/libvulkan.a"
+    break
+  fi
+done
+if [ -z "$NVK_LIB" ]; then
+  NVK_LIB="$NVK_ROOT/builddir-switch/src/nouveau/vulkan/libvulkan.a"
+fi
 DXC_X64="$root_dir/tools/XenosRecomp/thirdparty/dxc-bin/bin/x64"
 
 log() { echo; echo "==== $* ===="; }
@@ -52,7 +112,8 @@ log() { echo; echo "==== $* ===="; }
 for f in default.xex default.xexp shader.ar; do
   [ -f "UnleashedRecompLib/private/$f" ] || { echo "Missing UnleashedRecompLib/private/$f (copy from your game dump)." >&2; exit 2; }
 done
-[ -f "$NVK_LIB" ] || { echo "NVK driver not found: $NVK_LIB" >&2; exit 2; }
+[ -f "$NVK_LIB" ] || { echo "NVK driver not found under NVK_ROOT=$NVK_ROOT (looked for lib/libvulkan.a, opt/devkitpro/portlibs/switch/lib/libvulkan.a, mesa-unified-install/... and builddir-switch/src/nouveau/vulkan/libvulkan.a)." >&2; exit 2; }
+echo "NVK driver: $NVK_LIB"
 [ -z "$SWITCH_SHADER_CACHE_OBJECT" ] || [ -f "$SWITCH_SHADER_CACHE_OBJECT" ] || {
   echo "Shader-cache object not found: $SWITCH_SHADER_CACHE_OBJECT" >&2
   exit 2
@@ -61,7 +122,7 @@ done
 if [ -z "$SWITCH_SHADER_CACHE_OBJECT" ]; then
   [ -x "$CLANG64/clang.exe" ] || { echo "clang64 not found at $CLANG64 (pacman -S mingw-w64-clang-x86_64-clang)." >&2; exit 2; }
 fi
-if [ -z "$SWITCH_SHADER_CACHE_OBJECT" ]; then
+if [ -z "$SWITCH_SHADER_CACHE_OBJECT" ] || [ "$SWITCH_DIRECT_CALLS" = "1" ]; then
   if [ -z "$PYTHON" ]; then
     if command -v python3 >/dev/null 2>&1; then
       PYTHON=python3
@@ -70,7 +131,7 @@ if [ -z "$SWITCH_SHADER_CACHE_OBJECT" ]; then
     elif command -v python >/dev/null 2>&1; then
       PYTHON=python
     else
-      echo "Python is required to validate generated shaders." >&2
+      echo "Python is required to validate generated shaders and for SWITCH_DIRECT_CALLS." >&2
       exit 2
     fi
   fi
@@ -82,22 +143,38 @@ fi
 
 # ------------------------------------------------------------- 1. apply patches
 log "1/7 apply submodule patches"
-apply_patch() { # $1 patch file, $2 submodule dir
-  local p="$root_dir/patches/$1"
-  [ -f "$p" ] || return 0
-  ( cd "$2" 2>/dev/null || exit 0
+apply_patch() { # $1 submodule dir, $2... patch files applied in order after one reset
+  local dir="$1"; shift
+  local stamp="$root_dir/build/patch-stamps/$(echo "$dir" | tr '/' '_').stamp"
+  ( cd "$dir" 2>/dev/null || exit 0
+    # When the submodule holds exactly what these patches produced last time, its files are left
+    # alone: rewriting them gave them new timestamps, which rebuilt the host tools and plume and made
+    # CMake regenerate ppc/ on every build.
+    local patches_id diff_id
+    patches_id="$(for name in "$@"; do cat "$root_dir/patches/$name" 2>/dev/null; done | sha256sum | cut -c1-64)"
+    diff_id="$(git diff | sha256sum | cut -c1-64)"
+    if [ -f "$stamp" ] && [ "$(sed -n 1p "$stamp")" = "$patches_id" ] && [ "$(sed -n 2p "$stamp")" = "$diff_id" ]; then
+      echo "  $dir: patches already applied"
+      exit 0
+    fi
     git checkout -- . 2>/dev/null
-    if   git apply --check "$p" 2>/dev/null; then git apply "$p"; echo "  applied $1"
-    elif git apply --ignore-whitespace "$p" 2>/dev/null; then echo "  applied $1 (ws)"
-    else echo "  WARNING: $1 did not apply cleanly" >&2; fi )
+    for name in "$@"; do
+      local p="$root_dir/patches/$name"
+      [ -f "$p" ] || continue
+      if   git apply --check "$p" 2>/dev/null; then git apply "$p"; echo "  applied $name"
+      elif git apply --ignore-whitespace "$p" 2>/dev/null; then echo "  applied $name (ws)"
+      else echo "  WARNING: $name did not apply cleanly" >&2; fi
+    done
+    mkdir -p "$(dirname "$stamp")"
+    { echo "$patches_id"; git diff | sha256sum | cut -c1-64; } > "$stamp" )
 }
-apply_patch volk.patch                    thirdparty/plume/contrib/volk
-apply_patch plume.patch                   thirdparty/plume
-apply_patch imgui.patch                   thirdparty/imgui
-apply_patch implot.patch                  thirdparty/implot
-apply_patch concurrentqueue.patch         thirdparty/concurrentqueue
-apply_patch XenonRecomp.patch             tools/XenonRecomp
-apply_patch XenosRecomp-mingw-dxc.patch   tools/XenosRecomp
+apply_patch thirdparty/plume/contrib/volk volk.patch
+apply_patch thirdparty/plume              plume.patch plume-switch-perf.patch
+apply_patch thirdparty/imgui              imgui.patch
+apply_patch thirdparty/implot             implot.patch
+apply_patch thirdparty/concurrentqueue    concurrentqueue.patch
+apply_patch tools/XenonRecomp             XenonRecomp.patch
+apply_patch tools/XenosRecomp             XenosRecomp-mingw-dxc.patch XenosRecomp-switch-perf.patch
 
 # --------------------------------------------------- 2. host tools (arm64, native)
 log "2/7 build host tools (arm64)"
@@ -123,10 +200,31 @@ fi
 
 # ------------------------------------------------------- 4. recompile PPC from XEX
 log "4/7 recompile PPC from default.xex (+ default.xexp title update)"
+# ppc/ belongs to the recompiler that wrote it (its patch) and to its mode: regenerate when either changes.
+codegen_stamp="UnleashedRecompLib/ppc/codegen.txt"
+codegen_id="$(cat patches/XenonRecomp.patch 2>/dev/null | sha256sum | cut -c1-64) classic=$SWITCH_CLASSIC_CODEGEN"
+if [ -f UnleashedRecompLib/ppc/ppc_recomp.0.cpp ] && [ "$(cat "$codegen_stamp" 2>/dev/null)" != "$codegen_id" ]; then
+  echo "  ppc/ was generated by another recompiler or mode; regenerating"
+  # Only the generated files: the folder keeps its tracked .gitignore.
+  find UnleashedRecompLib/ppc -maxdepth 1 -type f ! -name .gitignore -delete
+fi
 if [ ! -f UnleashedRecompLib/ppc/ppc_recomp.0.cpp ]; then
+  mkdir -p UnleashedRecompLib/ppc # XenonRecomp does not create it
+  XENON_RECOMP_CLASSIC="$SWITCH_CLASSIC_CODEGEN" \
   build/host-tools/tools/XenonRecomp/XenonRecomp/XenonRecomp.exe \
     UnleashedRecompLib/config/SWA.toml tools/XenonRecomp/XenonUtils/ppc_context.h
+  [ -f UnleashedRecompLib/ppc/ppc_recomp.0.cpp ] || { echo "XenonRecomp wrote no code to UnleashedRecompLib/ppc" >&2; exit 1; }
+  echo "$codegen_id" > "$codegen_stamp"
 else echo "  ppc/ already generated (delete UnleashedRecompLib/ppc to regenerate)"; fi
+
+if [ "$SWITCH_DIRECT_CALLS" = "1" ]; then
+  # Idempotent: undoes its previous run first, so new hooks are picked up. The classic A/B build keeps
+  # every definition a plain one (no .text.hot section).
+  SWITCH_HOT_FUNCTIONS="$([ "$SWITCH_CLASSIC_CODEGEN" = "1" ] && echo 0 || echo 1)" \
+  "$PYTHON" tools/switch-direct-calls.py
+else
+  [ -f UnleashedRecompLib/ppc/direct_calls.txt ] && "$PYTHON" tools/switch-direct-calls.py --undo
+fi
 
 # --------------------------------------------------------- 5. generate shaders
 log "5/7 generate shader cache + app shaders"
@@ -137,9 +235,18 @@ if [ -n "$SWITCH_SHADER_CACHE_OBJECT" ]; then
 else
   shader_cache="UnleashedRecompLib/shader/shader_cache.cpp"
   shader_validator="tools/validate-switch-shader-cache.py"
+  shader_stamp="$shader_cache.translator"
   regenerate_shader_cache=false
 
+  # The cache holds compiled blobs, so a cache made by an older translator (for example without
+  # the constant-buffer path of XenosRecomp-switch-perf.patch) looks valid. Track the inputs.
+  translator_id="$(cat patches/XenosRecomp-mingw-dxc.patch patches/XenosRecomp-switch-perf.patch \
+    tools/XenosRecomp/XenosRecomp/shader_common.h 2>/dev/null | "$PYTHON" -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
+
   if [ ! -f "$shader_cache" ]; then
+    regenerate_shader_cache=true
+  elif [ "$(cat "$shader_stamp" 2>/dev/null)" != "$translator_id" ]; then
+    echo "  shader cache was made by a different translator; regenerating"
     regenerate_shader_cache=true
   elif ! "$PYTHON" "$shader_validator" "$shader_cache"; then
     echo "  existing shader cache is incomplete; regenerating with the fixed host tool"
@@ -155,6 +262,7 @@ else
       "$shader_candidate" tools/XenosRecomp/XenosRecomp/shader_common.h
     "$PYTHON" "$shader_validator" "$shader_candidate"
     mv -f "$shader_candidate" "$shader_cache"
+    echo "$translator_id" > "$shader_stamp"
   fi
 fi
 bash tools/generate-switch-app-shaders.sh
@@ -182,9 +290,25 @@ PATH="$DEVKITPRO/devkitA64/bin:$PATH" \
   -DUNLEASHED_RECOMP_HOST_X_DECOMPRESS="$root_dir/build/host-tools/tools/x_decompress/x_decompress.exe" \
   -DUNLEASHED_RECOMP_HOST_XENON_RECOMP="$root_dir/build/host-tools/tools/XenonRecomp/XenonRecomp/XenonRecomp.exe" \
   -DPLUME_PLATFORM_SWITCH=ON -DPLUME_SWITCH_NVK_ROOT="$NVK_ROOT" -DPLUME_SWITCH_NVK_LIBRARY="$NVK_LIB" \
+  -DUNLEASHED_RECOMP_SWITCH_LTO="$([ "$SWITCH_LTO" = "1" ] && echo ON || echo OFF)" \
+  -DUNLEASHED_RECOMP_SWITCH_LTO_JOBS="$SWITCH_LTO_JOBS" \
+  -DUNLEASHED_RECOMP_SWITCH_PGO="$SWITCH_PGO" \
+  -DUNLEASHED_RECOMP_SWITCH_PGO_DIR="$SWITCH_PGO_DIR" \
+  -DUNLEASHED_RECOMP_SWITCH_RECOMP_O2="$([ "$SWITCH_RECOMP_O2" = "1" ] && echo ON || echo OFF)" \
+  -DUNLEASHED_RECOMP_SWITCH_O2="$([ "$SWITCH_O2" = "1" ] && echo ON || echo OFF)" \
+  -DUNLEASHED_RECOMP_SWITCH_IPA_PTA="$([ "$SWITCH_IPA_PTA" = "1" ] && echo ON || echo OFF)" \
+  -DUNLEASHED_RECOMP_SWITCH_CLASSIC_CODEGEN="$([ "$SWITCH_CLASSIC_CODEGEN" = "1" ] && echo ON || echo OFF)" \
+  -DUNLEASHED_RECOMP_SWITCH_BUILD_ID="$SWITCH_BUILD_ID" \
   "${shader_cache_cmake_args[@]}" \
   -DCMAKE_MAKE_PROGRAM="$NINJA"
 PATH="$DEVKITPRO/devkitA64/bin:$PATH" "$CMAKE" --build build/switch-app -j"$JOBS" --target UnleashedRecomp
+
+if [ "$SWITCH_DIRECT_CALLS" = "1" ]; then
+  # Every sub_X in the ELF that is not an alias of its __imp__sub_X body is a hook; none of them may have
+  # been called directly.
+  "$PYTHON" tools/switch-direct-calls.py --verify-elf build/switch-app/UnleashedRecomp/UnleashedRecomp \
+    --nm "$DEVKITPRO/devkitA64/bin/aarch64-none-elf-nm"
+fi
 
 # ------------------------------------------------------------------ 7. package
 log "7/7 package NRO"

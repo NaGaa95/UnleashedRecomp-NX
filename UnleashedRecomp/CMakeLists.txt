@@ -98,12 +98,21 @@ if (UNLEASHED_RECOMP_SWITCH)
         "os/switch/logger_switch.cpp"
         "os/switch/media_switch.cpp"
         "os/switch/nvk_switch_stubs.c"
+        "os/switch/perf_switch.cpp"
+        "os/switch/overlay_switch.cpp"
+        "os/switch/pgo_switch.cpp"
+        "os/switch/cpu_profiler_switch.cpp"
+        "os/switch/stall_watch_switch.cpp"
+        "os/switch/crash_switch.cpp"
+        "os/switch/lzx_switch.cpp"
         "os/switch/process_switch.cpp"
         "os/switch/runtime_switch.cpp"
         "os/switch/user_switch.cpp"
         "os/switch/version_switch.cpp"
     )
     set_source_files_properties("os/switch/nvk_switch_stubs.c" PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+    # Includes <switch.h>, whose type names collide with parts of stdafx.h.
+    set_source_files_properties("os/switch/perf_switch.cpp" "os/switch/overlay_switch.cpp" "os/switch/pgo_switch.cpp" "os/switch/cpu_profiler_switch.cpp" "os/switch/stall_watch_switch.cpp" "os/switch/crash_switch.cpp" PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 elseif (WIN32)
     set(UNLEASHED_RECOMP_OS_CXX_SOURCES
         "os/win32/logger_win32.cpp"
@@ -475,6 +484,59 @@ target_link_libraries(UnleashedRecomp PRIVATE
 
 if (UNLEASHED_RECOMP_SWITCH)
     target_link_libraries(UnleashedRecomp PRIVATE nx)
+
+    # The build ID main.cpp prints first in stderr.log, as a generated header (a -D would not match the
+    # precompiled header). Rewritten only when it changes.
+    set(UNLEASHED_RECOMP_SWITCH_GENERATED_DIR "${CMAKE_BINARY_DIR}/generated")
+    # Round 9: the SHA-256 of the NVK driver library linked in, which keys the persistent pipeline cache (video.cpp).
+    set(UNLEASHED_RECOMP_SWITCH_DRIVER_ID "")
+    if (PLUME_SWITCH_NVK_LIBRARY AND EXISTS "${PLUME_SWITCH_NVK_LIBRARY}")
+        file(SHA256 "${PLUME_SWITCH_NVK_LIBRARY}" UNLEASHED_RECOMP_SWITCH_DRIVER_ID)
+    endif()
+    file(CONFIGURE OUTPUT "${UNLEASHED_RECOMP_SWITCH_GENERATED_DIR}/switch_build_id.h"
+        CONTENT "#pragma once\n#define UNLEASHED_RECOMP_SWITCH_BUILD_ID \"@UNLEASHED_RECOMP_SWITCH_BUILD_ID@\"\n#define UNLEASHED_RECOMP_SWITCH_DRIVER_ID \"@UNLEASHED_RECOMP_SWITCH_DRIVER_ID@\"\n" @ONLY)
+    target_include_directories(UnleashedRecomp PRIVATE "${UNLEASHED_RECOMP_SWITCH_GENERATED_DIR}")
+
+    # Profile-guided optimisation in two builds (see docs/SWITCH-PERFORMANCE.md):
+    #   generate: instrumented build; the game dumps .gcda files to sdmc:/switch/UnleashedRecomp/pgo
+    #             every 3 minutes (os/switch/pgo_switch.cpp). Build it without LTO.
+    #   use:      rebuild with those files copied into UNLEASHED_RECOMP_SWITCH_PGO_DIR.
+    # -fprofile-prefix-path makes each .gcda name relative to the build folder, in the host's native
+    # form, so the names match between the console and the PC. -fno-profile-values is mandatory:
+    # libgcov's value profiler reads TLS through tpidr_el0, which is 0 with libnx's -mtp=soft.
+    set(UNLEASHED_RECOMP_SWITCH_PGO "" CACHE STRING "Switch PGO: empty, generate or use")
+    set(UNLEASHED_RECOMP_SWITCH_PGO_DIR "${CMAKE_SOURCE_DIR}/pgo" CACHE PATH "Folder holding the .gcda profile")
+    if (UNLEASHED_RECOMP_SWITCH_PGO)
+        get_filename_component(UNLEASHED_RECOMP_PGO_DIR "${UNLEASHED_RECOMP_SWITCH_PGO_DIR}" ABSOLUTE)
+        file(TO_NATIVE_PATH "${CMAKE_BINARY_DIR}" UNLEASHED_RECOMP_PGO_PREFIX)
+        if (UNLEASHED_RECOMP_SWITCH_PGO STREQUAL "generate")
+            set(UNLEASHED_RECOMP_PGO_OPTIONS -fprofile-generate=${UNLEASHED_RECOMP_PGO_DIR}
+                "-fprofile-prefix-path=${UNLEASHED_RECOMP_PGO_PREFIX}" -fprofile-update=single -fno-profile-values)
+            target_link_options(UnleashedRecomp PRIVATE -fprofile-generate -Wl,--wrap=fopen)
+            target_compile_definitions(UnleashedRecomp PRIVATE UNLEASHED_RECOMP_PGO_GENERATE=1
+                "UNLEASHED_RECOMP_PGO_DIR=\"${UNLEASHED_RECOMP_PGO_DIR}\"")
+        elseif (UNLEASHED_RECOMP_SWITCH_PGO STREQUAL "use")
+            # -fprofile-correction: counters updated from several threads without synchronisation
+            # (-fprofile-update=single) can come out negative, which GCC otherwise rejects.
+            set(UNLEASHED_RECOMP_PGO_OPTIONS -fprofile-use=${UNLEASHED_RECOMP_PGO_DIR}
+                "-fprofile-prefix-path=${UNLEASHED_RECOMP_PGO_PREFIX}" -fprofile-partial-training
+                -fno-profile-values -fprofile-correction -Wno-missing-profile -Wno-error=coverage-mismatch)
+            target_link_options(UnleashedRecomp PRIVATE -fprofile-use -fprofile-partial-training -fprofile-correction)
+        else()
+            message(FATAL_ERROR "UNLEASHED_RECOMP_SWITCH_PGO must be empty, generate or use (is '${UNLEASHED_RECOMP_SWITCH_PGO}')")
+        endif()
+        message(STATUS "Switch PGO: ${UNLEASHED_RECOMP_SWITCH_PGO} (${UNLEASHED_RECOMP_PGO_DIR})")
+        foreach(pgo_target UnleashedRecompLib UnleashedRecomp)
+            target_compile_options(${pgo_target} PRIVATE ${UNLEASHED_RECOMP_PGO_OPTIONS})
+        endforeach()
+    endif()
+
+    # A/B experiment from nfsmw-nx: -O3 bloats the recompiled code and the Cortex-A57 has a 48 KB
+    # instruction cache; -O2 gives smaller code. Measure both before keeping it.
+    option(UNLEASHED_RECOMP_SWITCH_RECOMP_O2 "Compile the recompiled game code with -O2 instead of -O3." OFF)
+    if (UNLEASHED_RECOMP_SWITCH_RECOMP_O2)
+        target_compile_options(UnleashedRecompLib PRIVATE -O2)
+    endif()
 endif()
 
 target_include_directories(UnleashedRecomp PRIVATE

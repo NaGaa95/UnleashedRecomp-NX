@@ -160,6 +160,17 @@ struct GuestTexture : GuestBaseTexture
     std::unique_ptr<GuestTexture> patchedTexture;
     std::unique_ptr<GuestTexture> recreatedCubeMapTexture;
     struct GuestSurface* sourceSurface = nullptr;
+#if defined(__SWITCH__)
+    // [Switch] SwitchResolveHandOver: how CreateTexture made the image and its view, so that the image
+    // of a render target resolved into this texture can become this texture's image instead of being
+    // copied into it. hadSurfaceImage: this texture owns an image that was a render target's (cached
+    // framebuffers may name it).
+    RenderTextureViewDesc viewDesc{};
+    bool handOverCapable = false;
+    bool hadSurfaceImage = false;
+    // [Switch] SwitchKeepResolvesPending: the pending copy from sourceSurface was kept over a Present.
+    bool pendingCarried = false;
+#endif
 };
 
 struct GuestLockedRect
@@ -187,6 +198,14 @@ struct GuestBuffer : GuestResource
     RenderFormat format = RenderFormat::UNKNOWN;
     uint32_t guestFormat = 0;
     bool lockedReadOnly = false;
+#if defined(__SWITCH__)
+    // [Switch] SwitchStreamingBuffers, render thread only: the contents of this frame's last unlock
+    // from the game's D3D thread, in the frame's upload ring. Draws bind that copy; the end of the
+    // frame copies it into `buffer`. Valid while streamingFrame is the current streaming frame.
+    const RenderBuffer* streamingBuffer = nullptr;
+    uint64_t streamingOffset = 0;
+    uint64_t streamingFrame = 0;
+#endif
 };
 
 struct GuestSurfaceDesc
@@ -288,6 +307,22 @@ struct GuestShader : GuestResource
     std::unique_ptr<RenderShader> shader;
     struct ShaderCacheEntry* shaderCacheEntry = nullptr;
     ankerl::unordered_dense::map<uint32_t, std::unique_ptr<RenderShader>> linkedShaders;
+    // Vulkan: true once the SPIR-V is known to read its constants through the set 4 uniform
+    // buffers (or to read none), so draws with it do not need the push-constant pointers.
+    std::atomic<bool> constantsThroughUbo{ false };
+    // Vulkan pixel shaders: true once the SPIR-V is known not to write depth or the sample mask and
+    // to have no kill other than the alpha test, so a depth-only draw without alpha test gives the
+    // same depth without running it.
+    std::atomic<bool> removableInDepthOnlyPass{ false };
+    // Vulkan pixel shaders: bit N set when the SPIR-V reads the input at location N (TEXCOORD0-15
+    // are 0-15, COLOR0-1 16-17). All bits until the SPIR-V has been looked at: everything is read.
+    std::atomic<uint32_t> inputLocationsRead{ ~0u };
+    // Vulkan: start of the BLAKE3 of the SPIR-V, as the driver's NVK_SHADER_STATS lines print it
+    // (only filled while the GPU draw profiler is on).
+    uint32_t spirvBlake3 = 0;
+    // A pixel shader of the port's own (no cache entry) with no discard: the Gaussian and motion blur
+    // replacements (IsExactFullScreenDraw).
+    bool neverDiscards = false;
 #ifdef UNLEASHED_RECOMP_D3D12
     std::vector<ComPtr<IDxcBlob>> shaderBlobs;
     ComPtr<IDxcBlobEncoding> libraryBlob;

@@ -49,4 +49,10 @@ public:
     static bool IsPositionValid();
     static void Init(const char* sdlVideoDriver = nullptr);
     static void Update();
+
+#if defined(__SWITCH__)
+    // [Switch] The Resolution Scale option was set to `scale`: it becomes the current mode's
+    // (SwitchDockedResolutionScale or SwitchHandheldResolutionScale).
+    static void SetSwitchModeResolutionScale(float scale);
+#endif
 };

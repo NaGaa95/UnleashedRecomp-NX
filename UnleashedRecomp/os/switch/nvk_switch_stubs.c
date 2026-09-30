@@ -30,8 +30,11 @@
 #undef sigaddset
 #undef sigemptyset
 
+// Weak: if the driver archive ever brings its own definition (newer mesa-switch
+// builds compile more of the winsys), the linker takes that one instead of
+// failing on a duplicate; otherwise these are used exactly as before.
 #define STUB_ENOSYS(ret_type, name, args) \
-    ret_type name args { errno = ENOSYS; return (ret_type)-1; }
+    __attribute__((weak)) ret_type name args { errno = ENOSYS; return (ret_type)-1; }
 
 // ---------------------------------------------------------------------------
 // 1. Rust std glibc shims
@@ -40,9 +43,9 @@
 // Rust std probes the glibc version to decide whether modern syscalls
 // (statx, getrandom, ...) are worth trying. Report something ancient so it
 // stays on the conservative fallback paths.
-const char *gnu_get_libc_version(void) { return "2.17"; }
+__attribute__((weak)) const char *gnu_get_libc_version(void) { return "2.17"; }
 
-long sysconf(int name)
+__attribute__((weak)) long sysconf(int name)
 {
     switch (name)
     {
@@ -58,7 +61,7 @@ long sysconf(int name)
     }
 }
 
-int clock_nanosleep(int clock_id, int flags, const struct timespec *req, struct timespec *rem)
+__attribute__((weak)) int clock_nanosleep(int clock_id, int flags, const struct timespec *req, struct timespec *rem)
 {
     (void)clock_id;
     struct timespec relative = *req;
@@ -87,26 +90,26 @@ int clock_nanosleep(int clock_id, int flags, const struct timespec *req, struct 
 // Signal management: nothing on Horizon raises POSIX signals, so pretending
 // success keeps Rust std's optional signal-handler setup happy without
 // side effects.
-int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
+__attribute__((weak)) int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
 {
     (void)signum; (void)act;
     if (oldact != NULL)
         memset(oldact, 0, sizeof(*oldact));
     return 0;
 }
-int sigaltstack(const stack_t *ss, stack_t *old_ss) { (void)ss; (void)old_ss; return 0; }
-int sigaddset(sigset_t *set, int signum) { (void)set; (void)signum; return 0; }
-int sigemptyset(sigset_t *set) { if (set != NULL) memset(set, 0, sizeof(*set)); return 0; }
+__attribute__((weak)) int sigaltstack(const stack_t *ss, stack_t *old_ss) { (void)ss; (void)old_ss; return 0; }
+__attribute__((weak)) int sigaddset(sigset_t *set, int signum) { (void)set; (void)signum; return 0; }
+__attribute__((weak)) int sigemptyset(sigset_t *set) { if (set != NULL) memset(set, 0, sizeof(*set)); return 0; }
 
 // Identity/process queries with harmless constant answers.
-uid_t getuid(void) { return 1; }
-pid_t getppid(void) { return 1; }
-int pthread_setname_np(void *thread, const char *name) { (void)thread; (void)name; return 0; }
-void *dlsym(void *handle, const char *symbol) { (void)handle; (void)symbol; return NULL; }
+__attribute__((weak)) uid_t getuid(void) { return 1; }
+__attribute__((weak)) pid_t getppid(void) { return 1; }
+__attribute__((weak)) int pthread_setname_np(void *thread, const char *name) { (void)thread; (void)name; return 0; }
+__attribute__((weak)) void *dlsym(void *handle, const char *symbol) { (void)handle; (void)symbol; return NULL; }
 
 // pthread_getattr_np: only queried when Rust std computes stack guards for
 // threads it did not create. Failing is handled (std skips guard checks).
-int pthread_getattr_np(void *thread, void *attr) { (void)thread; (void)attr; return ENOSYS; }
+__attribute__((weak)) int pthread_getattr_np(void *thread, void *attr) { (void)thread; (void)attr; return ENOSYS; }
 
 // Rust's available_parallelism: failure falls back to 1, which is fine for
 // the NAK compiler (it is invoked per-shader from app threads anyway).
@@ -114,7 +117,7 @@ STUB_ENOSYS(int, sched_getaffinity, (pid_t pid, size_t cpusetsize, void *mask))
 
 // Memory protection: Rust std only calls this when building guard pages for
 // stacks it allocated itself via mmap, which newlib's mmap already refuses.
-int mprotect(void *addr, size_t len, int prot) { (void)addr; (void)len; (void)prot; return 0; }
+__attribute__((weak)) int mprotect(void *addr, size_t len, int prot) { (void)addr; (void)len; (void)prot; return 0; }
 
 // File I/O variants Rust std may attempt before falling back; all fail
 // cleanly. The glibc struct layouts (stat64/dirent64) differ from newlib's,
@@ -132,8 +135,8 @@ STUB_ENOSYS(long, readv, (int fd, const void *iov, int iovcnt))
 STUB_ENOSYS(long, sendfile64, (int out_fd, int in_fd, int64_t *offset, size_t count))
 STUB_ENOSYS(long, splice, (int fd_in, int64_t *off_in, int fd_out, int64_t *off_out, size_t len, unsigned int flags))
 STUB_ENOSYS(long, copy_file_range, (int fd_in, int64_t *off_in, int fd_out, int64_t *off_out, size_t len, unsigned int flags))
-void *readdir64(void *dirp) { (void)dirp; errno = ENOSYS; return NULL; }
-void *fdopendir(int fd) { (void)fd; errno = ENOSYS; return NULL; }
+__attribute__((weak)) void *readdir64(void *dirp) { (void)dirp; errno = ENOSYS; return NULL; }
+__attribute__((weak)) void *fdopendir(int fd) { (void)fd; errno = ENOSYS; return NULL; }
 STUB_ENOSYS(int, dirfd, (void *dirp))
 STUB_ENOSYS(int, unlinkat, (int dirfd_, const char *pathname, int flags))
 STUB_ENOSYS(int, linkat, (int olddirfd, const char *oldpath, int newdirfd, const char *newpath, int flags))
@@ -179,20 +182,111 @@ STUB_ENOSYS(int, __res_init, (void))
 //    but the backend never probes successfully on Horizon).
 // ---------------------------------------------------------------------------
 
-void nouveau_ws_bo_destroy(void *bo) { (void)bo; }
-int nouveau_ws_bo_dma_buf(void *bo, int *fd) { (void)bo; (void)fd; errno = ENOSYS; return -1; }
-void *nouveau_ws_bo_from_dma_buf(void *dev, int fd, void *size_out) { (void)dev; (void)fd; (void)size_out; return NULL; }
-void *nouveau_ws_bo_new_tiled(void *dev, uint64_t size, uint64_t align, uint8_t pte_kind, uint16_t tile_mode, unsigned flags) { (void)dev; (void)size; (void)align; (void)pte_kind; (void)tile_mode; (void)flags; return NULL; }
-int nouveau_ws_context_create(void *dev, unsigned flags, void **out) { (void)dev; (void)flags; (void)out; errno = ENOSYS; return -1; }
-void nouveau_ws_context_destroy(void *ctx) { (void)ctx; }
-void nouveau_ws_device_destroy(void *dev) { (void)dev; }
-uint64_t nouveau_ws_device_timestamp(void *dev) { (void)dev; return 0; }
-uint64_t nouveau_ws_device_vram_used(void *dev) { (void)dev; return 0; }
+__attribute__((weak)) void nouveau_ws_bo_destroy(void *bo) { (void)bo; }
+__attribute__((weak)) int nouveau_ws_bo_dma_buf(void *bo, int *fd) { (void)bo; (void)fd; errno = ENOSYS; return -1; }
+__attribute__((weak)) void *nouveau_ws_bo_from_dma_buf(void *dev, int fd, void *size_out) { (void)dev; (void)fd; (void)size_out; return NULL; }
+__attribute__((weak)) void *nouveau_ws_bo_new_tiled(void *dev, uint64_t size, uint64_t align, uint8_t pte_kind, uint16_t tile_mode, unsigned flags) { (void)dev; (void)size; (void)align; (void)pte_kind; (void)tile_mode; (void)flags; return NULL; }
+__attribute__((weak)) int nouveau_ws_context_create(void *dev, unsigned flags, void **out) { (void)dev; (void)flags; (void)out; errno = ENOSYS; return -1; }
+__attribute__((weak)) void nouveau_ws_context_destroy(void *ctx) { (void)ctx; }
+__attribute__((weak)) void nouveau_ws_device_destroy(void *dev) { (void)dev; }
+__attribute__((weak)) uint64_t nouveau_ws_device_timestamp(void *dev) { (void)dev; return 0; }
+__attribute__((weak)) uint64_t nouveau_ws_device_vram_used(void *dev) { (void)dev; return 0; }
 
 // ---------------------------------------------------------------------------
 // 3. Vulkan runtime DRM syncobj path (unused with nvkmd_switch).
 // ---------------------------------------------------------------------------
 
-void vk_drm_syncobj_finish(void *device, void *sync) { (void)device; (void)sync; }
+__attribute__((weak)) void vk_drm_syncobj_finish(void *device, void *sync) { (void)device; (void)sync; }
+
+// ---------------------------------------------------------------------------
+// 4. libelf (current mesa-switch builds). nv_cubin.c, the NVIDIA CUBIN parser,
+//    is part of the static driver and references libelf, which devkitPro does
+//    not ship. The parser is never used on Horizon. Weak, so a real libelf (or a
+//    driver that brings its own) takes precedence; unused with older drivers.
+//    If one of these were ever reached, elf_version() reporting "no version"
+//    and NULL/-1 everywhere else make the caller give up cleanly.
+// ---------------------------------------------------------------------------
+
+#define ELF_STUB __attribute__((weak))
+
+ELF_STUB unsigned int elf_version(unsigned int version) { (void)version; return 0; /* EV_NONE */ }
+ELF_STUB void *elf_memory(char *image, size_t size) { (void)image; (void)size; return NULL; }
+ELF_STUB int elf_end(void *elf) { (void)elf; return 0; }
+ELF_STUB int elf_kind(void *elf) { (void)elf; return 0; /* ELF_K_NONE */ }
+ELF_STUB int elf_errno(void) { return 0; }
+ELF_STUB const char *elf_errmsg(int error) { (void)error; return "libelf is not available on Horizon"; }
+ELF_STUB void *elf64_getehdr(void *elf) { (void)elf; return NULL; }
+ELF_STUB void *elf64_getshdr(void *section) { (void)section; return NULL; }
+ELF_STUB void *elf_getscn(void *elf, size_t index) { (void)elf; (void)index; return NULL; }
+ELF_STUB void *elf_nextscn(void *elf, void *section) { (void)elf; (void)section; return NULL; }
+ELF_STUB void *elf_getdata(void *section, void *data) { (void)section; (void)data; return NULL; }
+ELF_STUB char *elf_strptr(void *elf, size_t section, size_t offset) { (void)elf; (void)section; (void)offset; return NULL; }
+ELF_STUB int elf_getshdrstrndx(void *elf, size_t *index)
+{
+    (void)elf;
+    if (index != NULL)
+        *index = 0;
+    return -1;
+}
+
+#undef ELF_STUB
+
+// ---------------------------------------------------------------------------
+// 5. EGL (devkitPro's SDL2). SDL's Switch video driver keeps a table of EGL
+//    entry points for OpenGL windows, so libSDL2.a references them as soon as
+//    SDL video is used. This app renders with Vulkan (its window is created
+//    without SDL_WINDOW_OPENGL), so SDL never calls them. Linking devkitPro's
+//    libEGL.a instead would pull in its older Mesa next to the NVK driver's,
+//    with clashing symbol names. Weak failure stubs keep both out: should SDL
+//    ever try, it gets "no display" / EGL_FALSE and reports an SDL error.
+// ---------------------------------------------------------------------------
+
+#define EGL_STUB __attribute__((weak))
+#define EGL_STUB_FALSE 0u              // EGL_FALSE
+#define EGL_STUB_NOT_INITIALIZED 0x3001 // EGL_NOT_INITIALIZED
+#define EGL_STUB_NONE 0x3038u          // EGL_NONE
+
+EGL_STUB void *eglGetDisplay(void *display) { (void)display; return NULL; }
+EGL_STUB void *eglGetPlatformDisplay(unsigned int platform, void *display, const intptr_t *attributes)
+{ (void)platform; (void)display; (void)attributes; return NULL; }
+EGL_STUB unsigned int eglInitialize(void *display, int *major, int *minor)
+{ (void)display; (void)major; (void)minor; return EGL_STUB_FALSE; }
+EGL_STUB unsigned int eglTerminate(void *display) { (void)display; return EGL_STUB_FALSE; }
+EGL_STUB void *eglGetProcAddress(const char *name) { (void)name; return NULL; }
+EGL_STUB unsigned int eglChooseConfig(void *display, const int *attributes, void **configs, int size, int *count)
+{ (void)display; (void)attributes; (void)configs; (void)size; if (count != NULL) *count = 0; return EGL_STUB_FALSE; }
+EGL_STUB unsigned int eglGetConfigs(void *display, void **configs, int size, int *count)
+{ (void)display; (void)configs; (void)size; if (count != NULL) *count = 0; return EGL_STUB_FALSE; }
+EGL_STUB unsigned int eglGetConfigAttrib(void *display, void *config, int attribute, int *value)
+{ (void)display; (void)config; (void)attribute; (void)value; return EGL_STUB_FALSE; }
+EGL_STUB void *eglCreateContext(void *display, void *config, void *share, const int *attributes)
+{ (void)display; (void)config; (void)share; (void)attributes; return NULL; }
+EGL_STUB unsigned int eglDestroyContext(void *display, void *context) { (void)display; (void)context; return EGL_STUB_FALSE; }
+EGL_STUB void *eglCreatePbufferSurface(void *display, void *config, const int *attributes)
+{ (void)display; (void)config; (void)attributes; return NULL; }
+EGL_STUB void *eglCreateWindowSurface(void *display, void *config, void *window, const int *attributes)
+{ (void)display; (void)config; (void)window; (void)attributes; return NULL; }
+EGL_STUB unsigned int eglDestroySurface(void *display, void *surface) { (void)display; (void)surface; return EGL_STUB_FALSE; }
+EGL_STUB unsigned int eglQuerySurface(void *display, void *surface, int attribute, int *value)
+{ (void)display; (void)surface; (void)attribute; (void)value; return EGL_STUB_FALSE; }
+EGL_STUB unsigned int eglMakeCurrent(void *display, void *draw, void *read, void *context)
+{ (void)display; (void)draw; (void)read; (void)context; return EGL_STUB_FALSE; }
+EGL_STUB void *eglGetCurrentContext(void) { return NULL; }
+EGL_STUB void *eglGetCurrentDisplay(void) { return NULL; }
+EGL_STUB void *eglGetCurrentSurface(int which) { (void)which; return NULL; }
+EGL_STUB unsigned int eglSwapBuffers(void *display, void *surface) { (void)display; (void)surface; return EGL_STUB_FALSE; }
+EGL_STUB unsigned int eglSwapInterval(void *display, int interval) { (void)display; (void)interval; return EGL_STUB_FALSE; }
+EGL_STUB unsigned int eglWaitNative(int engine) { (void)engine; return EGL_STUB_FALSE; }
+EGL_STUB unsigned int eglWaitGL(void) { return EGL_STUB_FALSE; }
+EGL_STUB unsigned int eglBindAPI(unsigned int api) { (void)api; return EGL_STUB_FALSE; }
+EGL_STUB unsigned int eglQueryAPI(void) { return EGL_STUB_NONE; }
+EGL_STUB unsigned int eglReleaseThread(void) { return EGL_STUB_FALSE; }
+EGL_STUB const char *eglQueryString(void *display, int name) { (void)display; (void)name; return NULL; }
+EGL_STUB int eglGetError(void) { return EGL_STUB_NOT_INITIALIZED; }
+
+#undef EGL_STUB
+#undef EGL_STUB_FALSE
+#undef EGL_STUB_NOT_INITIALIZED
+#undef EGL_STUB_NONE
 
 #endif // __SWITCH__

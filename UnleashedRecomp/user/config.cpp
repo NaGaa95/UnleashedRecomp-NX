@@ -789,6 +789,14 @@ void Config::CreateCallbacks()
     };
 
 #if defined(__SWITCH__)
+    // [Switch] Kept per mode, docked and handheld (GameWindow).
+    Config::ResolutionScale.ApplyCallback = [](ConfigDef<float>* def)
+    {
+        GameWindow::SetSwitchModeResolutionScale(def->Value);
+    };
+#endif
+
+#if defined(__SWITCH__)
     Config::FrameGenerationFlowScale.Callback = [](ConfigDef<float, true>* def)
     {
         def->Value = def->Value > 0.375f ? 0.5f : 0.25f;

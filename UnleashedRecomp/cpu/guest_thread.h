@@ -50,6 +50,8 @@ struct GuestThreadHandle : KernelObject
     // KeSetBasePriorityThread work cross-thread and pre-start.
     std::atomic<uint32_t> kernelHandle = 0;
     std::atomic<int32_t> pendingHorizonPriority = -1;
+    // Core named by SetThreadIdealProcessor before the handle existed ([Switch] SwitchThreadIdealCores).
+    std::atomic<int32_t> pendingIdealCore = -1;
 #endif
 
     GuestThreadHandle(const GuestThreadParams& params);

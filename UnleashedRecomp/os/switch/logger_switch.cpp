@@ -18,6 +18,11 @@ namespace
     FILE* g_logFile = nullptr;
     uint32_t g_logLineCount = 0;
 
+    // Before SetFileEnabled (Config::Load has not run yet): the lines, up to this many bytes.
+    constexpr size_t kEarlyBytes = 16 * 1024;
+    bool g_fileDecided = false;
+    std::string g_earlyLines;
+
     std::string FormatLogLine(std::string_view str, os::logger::ELogType type, const char* func)
     {
         const char* prefix = "";
@@ -62,16 +67,42 @@ void os::logger::Init()
 
     std::error_code ec;
     std::filesystem::create_directories(kLogDirectory, ec);
+}
 
-    g_logFile = fopen(kLogPath, "w");
-    if (g_logFile != nullptr)
-        setvbuf(g_logFile, nullptr, _IOFBF, 64 * 1024);
+void os::logger::SetFileEnabled(bool enabled)
+{
+    std::lock_guard lock(g_logMutex);
+
+    g_fileDecided = true;
+    if (enabled && g_logFile == nullptr)
+    {
+        g_logFile = fopen(kLogPath, "w");
+        if (g_logFile != nullptr)
+        {
+            setvbuf(g_logFile, nullptr, _IOFBF, 64 * 1024);
+            fputs(g_earlyLines.c_str(), g_logFile);
+            fflush(g_logFile);
+        }
+    }
+
+    g_earlyLines.clear();
+    g_earlyLines.shrink_to_fit();
 }
 
 void os::logger::Log(const std::string_view str, ELogType type, const char* func)
 {
     const auto line = FormatLogLine(str, type, func);
     std::lock_guard lock(g_logMutex);
+
+    if (!g_fileDecided)
+    {
+        if (g_earlyLines.size() + line.size() + 1 <= kEarlyBytes)
+        {
+            g_earlyLines += line;
+            g_earlyLines += '\n';
+        }
+        return;
+    }
 
     if (g_logFile != nullptr)
     {

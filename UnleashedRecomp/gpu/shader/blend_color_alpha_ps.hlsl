@@ -2,9 +2,11 @@
 
 #ifdef __spirv__
 
-#define g_SrcAlpha_DestAlpha vk::RawBufferLoad<float4>(g_PushConstants.PixelShaderConstants + 2400, 0x10)
-#define s0_Texture2DDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 0)
-#define s0_SamplerDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 192)
+// Constants: from the set 4 uniform buffers when the pipeline has SPEC_CONSTANT_CONSTANTS_UBO (NVK reads
+// them from a hardware constant bank), otherwise through the push-constant pointers, as before.
+#define g_SrcAlpha_DestAlpha (UR_CONSTANTS_UBO ? g_UboPixel.v[150] : vk::RawBufferLoad<float4>(g_PushConstants.PixelShaderConstants + 2400, 0x10))
+#define s0_Texture2DDescriptorIndex (UR_CONSTANTS_UBO ? UR_SHARED_UINT(0) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 0))
+#define s0_SamplerDescriptorIndex (UR_CONSTANTS_UBO ? UR_SHARED_UINT(192) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 192))
 
 #else
 
